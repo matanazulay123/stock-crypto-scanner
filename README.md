@@ -15,8 +15,8 @@ This project was created as a personal learning challenge, and it's perfect for:
 ## 💡 What does it do?
 
 This script scans:
-- 📈 **Top 500 U.S. stocks (S&P 500)**
-- 🪙 **Top cryptocurrencies (with market cap over $1B)**
+-  **Top 500 U.S. stocks (S&P 500)**
+-  **Top cryptocurrencies (with market cap over $1B)**
 
 For each asset, it checks if the current price is **close to its recent average price** (based on the last few months).  
 This is a common method some investors use to spot when assets might be **undervalued or ready for a potential move**.
