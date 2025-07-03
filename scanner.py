@@ -1,223 +1,204 @@
-
-import requests
+import os
+import smtplib
+from datetime import datetime
 import pandas as pd
 import yfinance as yf
-import smtplib
 from email.mime.text import MIMEText
-from pycoingecko import CoinGeckoAPI
-from dotenv import load_dotenv
-import os
+from IPython.display import HTML, display
 load_dotenv()
 
 
  ###################################################
 # CONFIG – עדכן לפני הרצה
 ###################################################
-recipient_email = "matanazulay123@gmail.com"
-sender_email    = "matanazulay123@gmail.com"
-sender_password = "qxonvrvfzhaxjicz"  # Gmail App Password
-ma_days = 150
+MA_DAYS           = 150
+RECIPIENT_EMAIL   = "matanazul23@gmail.com"
+SENDER_EMAIL      = "matanazul23@gmail.com"
+SENDER_PASSWORD   = os.getenv("GMAIL_APP_PASSWORD")
 
-###################################################
-# 1) פונקציות למניות
-###################################################
-def get_sp500_tickers_from_wikipedia():
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    df = pd.read_html(url)[0]
-    # Some symbols from Wikipedia might have a '.' which yfinance doesn't like, e.g., 'BRK.B'.
-    # yfinance prefers a '-' instead, e.g., 'BRK-B'.
-    return [ticker.replace('.', '-') for ticker in df['Symbol'].tolist()]
 
-def check_stock_ma_slope(ticker, moving_average_days=150):
-    df = yf.download(ticker, period=f"{moving_average_days + 30}d", interval="1d",
-                     progress=False, threads=False)
-    # yfinance sometimes returns a multi-index column header, this flattens it.
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
-    if df.empty or len(df) < moving_average_days + 15:
-        return None, None, None, None
-    df['MA_150'] = df['Close'].rolling(window=moving_average_days).mean()
-    if pd.isna(df['MA_150'].iloc[-1]):
-        return None, None, None, None
-    last_close = df['Close'].iloc[-1]
-    last_ma    = df['MA_150'].iloc[-1]
-    distance   = ((last_ma - last_close)/last_ma)*100
-    ma_7_ago   = df['MA_150'].iloc[-8]
-    ma_14_ago  = df['MA_150'].iloc[-15]
-    slope_1    = ma_7_ago - ma_14_ago
-    slope_2    = last_ma - ma_7_ago
-    slope_status = None
-    if slope_2 > 0:
-        slope_status = "UPWARD"
-        if slope_1 < 0:
-            slope_status = "BEARISH->BULLISH"
-    return distance, last_close, last_ma, slope_status
+# ASSET DATA FUNCTIONS (STOCKS & CRYPTO)
 
-###################################################
-# 2) פונקציות לקריפטו
-###################################################
-def get_coins_above_1B_from_coingecko():
-    cg = CoinGeckoAPI()
-    rows = cg.get_coins_markets(vs_currency='usd', order='market_cap_desc',
-                                per_page=300, page=1)
-    return [coin for coin in rows if coin.get('market_cap') and coin['market_cap'] > 1_000_000_000]
 
-# --- MODIFIED AND FIXED FUNCTION ---
-def get_binance_usdt_symbols():
-    """
-    Fetches all USDT trading pairs from Binance with error handling.
-    """
-    url = "https://api.binance.com/api/v3/exchangeInfo"
+def get_sp500_tickers() -> list[str]:
     try:
-        response = requests.get(url, timeout=10)
-        # Check if the request was successful (HTTP 200 OK)
-        if response.status_code == 200:
-            data = response.json()
-            # Check if the 'symbols' key exists in the response data
-            if 'symbols' in data:
-                return {s['symbol'] for s in data['symbols'] if s.get('quoteAsset') == 'USDT'}
-            else:
-                print(f"Error: 'symbols' key not found in Binance response. Data received: {data}")
-                return set() # Return an empty set to prevent script crash
-        else:
-            # The request failed with a non-200 status code
-            print(f"Error fetching data from Binance API. Status Code: {response.status_code}, Response: {response.text}")
-            return set() # Return an empty set
-    except requests.exceptions.RequestException as e:
-        # Handle potential network errors (e.g., timeout, connection error)
-        print(f"A network error occurred while contacting Binance API: {e}")
-        return set()
-
-def get_binance_klines(symbol, limit=200):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1d&limit={limit}"
-    raw = requests.get(url).json()
-    if not isinstance(raw, list):
-        return pd.DataFrame()
-    cols = ["open_time","open","high","low","close","volume",
-            "close_time","qav","trades","tbv","tqv","ignore"]
-    df = pd.DataFrame(raw, columns=cols)
-    num_cols = ["open","high","low","close","volume","qav","tbv","tqv"]
-    df[num_cols] = df[num_cols].apply(pd.to_numeric, errors='coerce')
-    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-    df.set_index('open_time', inplace=True)
-    return df
-
-def check_crypto_ma_slope(symbol_binance, days=150):
-    df = get_binance_klines(symbol_binance, limit=days+30)
-    if df.empty or len(df) < days+15:
-        return None, None, None, None
-    df['MA_150'] = df['close'].rolling(days).mean()
-    if pd.isna(df['MA_150'].iloc[-1]):
-        return None, None, None, None
-    last_close = df['close'].iloc[-1]
-    last_ma    = df['MA_150'].iloc[-1]
-    distance   = ((last_ma - last_close)/last_ma)*100
-    ma_7_ago   = df['MA_150'].iloc[-8]
-    ma_14_ago  = df['MA_150'].iloc[-15]
-    slope_1    = ma_7_ago - ma_14_ago
-    slope_2    = last_ma - ma_7_ago
-    slope_status = None
-    if slope_2 > 0:
-        slope_status = "UPWARD"
-        if slope_1 < 0:
-            slope_status = "BEARISH->BULLISH"
-    return distance, last_close, last_ma, slope_status
-
-###################################################
-# 3) שליחת אימייל
-###################################################
-def send_email(subject, html_message, recipient_email, sender_email, sender_password):
-    msg = MIMEText(html_message, 'html')
-    msg['Subject'] = subject
-    msg['From'] = sender_email
-    msg['To'] = recipient_email
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-        print("Email sent successfully!")
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        df  = pd.read_html(url)[0]
+        tickers = [sym.replace('.', '-') for sym in df['Symbol'].tolist()]
+        tickers.append('^GSPC') # הוספת מדד ה-S&P 500 עצמו (סימול SPX)
+        return tickers
     except Exception as e:
-        print(f"Failed to send email: {e}")
+        print(f"[ERROR] Failed to fetch S&P 500 tickers: {e}")
+        return []
 
+def get_crypto_tickers() -> list[str]:
+    raw_tickers = [
+        'BTC', 'ETH', 'XRP', 'BNB', 'SOL', 'TRX', 'DOGE', 'ADA', 'HYPE', 
+        'BCH', 'SUI', 'LINK', 'LEO', 'AVAX', 'XLM', 'TON', 'SHIB', 'LTC',
+        'HBAR', 'XMR', 'DOT', 'BGB', 'UNI', 'PEPE', 'AAVE', 'PI',
+        'APT', 'OKB', 'TAO', 'NEAR', 'ICP', 'ETC', 'ONDO', 'KAS', 'POL', 
+        'MNT', 'GT', 'VET', 'TRUMP', 'SKY', 'ARB', 'RENDER', 'FET', 'ENA',
+        'ATOM', 'FIL', 'ALGO', 'WLD', 'SEI', 'KCS', 'JUP', 'BONK', 'QNT',
+        'FLR', 'INJ', 'TIA', 'FOUR', 'STX'
+    ]
+    
+    # 'SYMBOL-USD'
+    return [f"{ticker.upper()}-USD" for ticker in raw_tickers]
 
-###################################################
-# MAIN
-###################################################
-print("Starting scanner...")
-stocks_below, stocks_above = [], []
-crypto_below, crypto_above = [], []
+def process_assets_in_batch(tickers: list, asset_type: str, days: int = MA_DAYS) -> list[dict]:
+   
+    if not tickers:
+        return []
+        
+    print(f"\n[INFO] Downloading data for {len(tickers)} {asset_type} assets at once...")
+    all_data = yf.download(
+        tickers, 
+        period=f"{days+50}d",
+        interval="1d", 
+        progress=True, 
+        threads=True,
+        group_by='ticker',
+        auto_adjust=True
+    )
+    
+    results = []
+    
+    print(f"[INFO] Processing {asset_type} data...")
 
-# A) Stocks
-print("Scanning S&P 500 stocks...")
-sp500_tickers = get_sp500_tickers_from_wikipedia()
-for i, tk in enumerate(sp500_tickers):
-    print(f"  Processing stock {i+1}/{len(sp500_tickers)}: {tk}", end='\r')
-    try:
-        dist, lc, ma_val, slope = check_stock_ma_slope(tk, ma_days)
-        if dist is None: continue
-        if 0 <= dist <= 1:
-            stocks_below.append((tk, lc, ma_val, dist, slope))
-        elif -1.5 <= dist < 0:
-            stocks_above.append((tk, lc, ma_val, dist, slope))
-    except Exception as e:
-        print(f"\nError processing stock {tk}: {e}")
-stocks_below.sort(key=lambda x: x[3])
-stocks_above.sort(key=lambda x: abs(x[3]))
-print("\nStock scan complete.")
-
-# B) Crypto
-print("Scanning cryptocurrencies...")
-bin_syms = get_binance_usdt_symbols()
-if not bin_syms:
-    print("Could not retrieve Binance symbols. Skipping crypto scan.")
-else:
-    coins_to_check = get_coins_above_1B_from_coingecko()
-    for i, coin in enumerate(coins_to_check):
-        sym_bin = coin['symbol'].upper() + "USDT"
-        print(f"  Processing crypto {i+1}/{len(coins_to_check)}: {sym_bin}", end='\r')
-        if sym_bin not in bin_syms:
-            continue
+    valid_tickers = all_data.columns.get_level_values(0).unique()
+    for ticker in valid_tickers:
         try:
-            # Add a small delay to avoid hitting API rate limits
-            time.sleep(0.2)
-            dist, lc, ma_val, slope = check_crypto_ma_slope(sym_bin, ma_days)
-            if dist is None: continue
-            if 0 <= dist <= 1:
-                crypto_below.append((sym_bin, lc, ma_val, dist, slope))
-            elif -1.5 <= dist < 0:
-                crypto_above.append((sym_bin, lc, ma_val, dist, slope))
+            df = all_data[ticker].copy()
+            df.dropna(subset=['Close'], inplace=True)
+            
+            if df.empty or len(df) < days + 15:
+                continue
+            
+            df['MA'] = df['Close'].rolling(days).mean()
+            if pd.isna(df['MA'].iloc[-1]):
+                continue
+            
+            last_close = df['Close'].iloc[-1]
+            last_ma    = df['MA'].iloc[-1]
+            dist_pct   = ((last_ma - last_close) / last_ma) * 100
+            
+            if len(df['MA'].dropna()) > 15:
+                slope_7    = df['MA'].iloc[-8]  - df['MA'].iloc[-15]
+                slope_now  = last_ma - df['MA'].iloc[-8]
+                slope_tag  = "UPWARD" if slope_now > 0 else "DOWNWARD"
+                if slope_now > 0 and slope_7 < 0:
+                    slope_tag = "BEARISH→BULLISH"
+            else:
+                slope_tag = "N/A"
+
+            results.append({
+                'ticker': ticker,
+                'price': last_close,
+                'ma': last_ma,
+                'dist_pct': dist_pct,
+                'slope': slope_tag
+            })
+            
         except Exception as e:
-            print(f"\nError processing crypto {sym_bin}: {e}")
-crypto_below.sort(key=lambda x: x[3])
-crypto_above.sort(key=lambda x: abs(x[3]))
-print("\nCrypto scan complete.")
+            print(f"\n[WARN] Error processing {ticker}: {e}")
+            continue
+            
+    print(f"[INFO] {asset_type.capitalize()} processing complete.")
+    return results
 
+# EMAIL & HTML
 
-# C) HTML and Email
-def table_html(rows, head, bg):
+def send_email(subject: str, html_body: str):
+    if not SENDER_PASSWORD:
+        print("[WARN] Email not sent because SENDER_PASSWORD environment variable is not set.")
+        return
+    try:
+        msg = MIMEText(html_body, 'html', 'utf-8')
+        msg['Subject'] = subject; msg['From'] = SENDER_EMAIL; msg['To'] = RECIPIENT_EMAIL
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
+            s.login(SENDER_EMAIL, SENDER_PASSWORD)
+            s.send_message(msg)
+        print("[INFO] Email sent! 🎉")
+    except Exception as e:
+        print(f"[ERROR] Email failed: {e}")
+
+BASE_STYLE = """
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;margin:0;padding:0;background:#fafafa;direction:rtl;text-align:right;}
+  table{border-collapse:collapse;width:96%;margin:20px auto;font-size:14px;border-radius:6px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.05)}
+  thead tr{background:#1565c0;color:#fff}
+  th,td{padding:12px 10px;text-align:right;border-left: 1px solid #ddd;}
+  th:last-child, td:last-child {border-left: none;}
+  tbody tr:nth-child(even){background:#f1f5f9}
+  tbody tr:hover{background:#e3f2fd}
+  h3{margin:24px 24px 6px 0;color:#1565c0;font-weight:600}
+</style>
+"""
+
+def make_table(rows, title):
     if not rows: return ""
-    html = f"<h3 style='padding:10px;background:#cce5ff;border-radius:5px'>{head}</h3>"
-    html += "<table style='border-collapse:collapse;margin-bottom:20px;width:85%;border:1px solid #ddd;'>"
-    html += "<thead><tr style='background:#f2f2f2'><th style='padding:8px;border:1px solid #ddd;'>Symbol</th><th style='padding:8px;border:1px solid #ddd;'>Close</th><th style='padding:8px;border:1px solid #ddd;'>MA</th><th style='padding:8px;border:1px solid #ddd;'>Dist%</th><th style='padding:8px;border:1px solid #ddd;'>Slope</th></tr></thead><tbody>"
-    for sym, close, ma, dist, slope in rows:
-        slope_text = slope if slope is not None else "FLAT/DOWN"
-        html += f"<tr style='background:{bg};'><td style='padding:8px;border:1px solid #ddd;'>{sym}</td><td style='padding:8px;border:1px solid #ddd;'>{close:.2f}</td><td style='padding:8px;border:1px solid #ddd;'>{ma:.2f}</td><td style='padding:8px;border:1px solid #ddd;'>{dist:.2f}%</td><td style='padding:8px;border:1px solid #ddd;'>{slope_text}</td></tr>"
-    return html + "</tbody></table>"
+    html = f"<h3>{title}</h3>"
+    html += ("<table><thead><tr>"
+             "<th>שיפוע</th><th>% מרחק</th><th>ממוצע נע 150</th>"
+             "<th>מחיר נוכחי</th><th>סימול</th></tr></thead><tbody>")
+    for sym, price, ma, dist, slope in rows:
+        slope_str = slope or "—"
+        display_sym = sym.replace('-USD', '')
+        html += (f"<tr><td>{slope_str}</td><td>{dist:.2f}%</td><td>${ma:,.2f}</td>"
+                 f"<td>${price:,.2f}</td><td>{display_sym}</td></tr>")
+    html += "</tbody></table>"
+    return html
 
-html_body = "<!DOCTYPE html><html><head><style>body{font-family:Arial,sans-serif;}</style></head><body>"
-html_body += table_html(stocks_below, f"Stocks below MA{ma_days} (within 1%)", '#d1e7dd')
-html_body += table_html(stocks_above, f"Stocks above MA{ma_days} (within 1.5%)", '#cff4fc')
-html_body += table_html(crypto_below, f"Crypto below MA{ma_days} (within 1%)", '#d1e7dd')
-html_body += table_html(crypto_above, f"Crypto above MA{ma_days} (within 1.5%)", '#cff4fc')
-html_body += "</body></html>"
+# MAIN
 
+def main():
+    print("🚀  Scanner started:", datetime.now().strftime("%Y-%m-%d %H:%M"))
 
-print("\n--- Scan Results ---")
-display(HTML(html_body))
+    # ── Stocks
+    sp500_tickers = get_sp500_tickers()
+    stock_results = process_assets_in_batch(sp500_tickers, "stock", days=MA_DAYS)
+    
+    # ── Crypto
+    crypto_tickers = get_crypto_tickers()
+    crypto_results = process_assets_in_batch(crypto_tickers, "crypto", days=MA_DAYS)
+    
+    # -- Process and sort results
+    def sort_and_categorize(results):
+        below, above = [], []
+        for res in results:
+            dist = res['dist_pct']
+            row = (res['ticker'], res['price'], res['ma'], dist, res['slope'])
+            if 0 <= dist <= 1.0:
+                below.append(row)
+            elif -1.5 <= dist < 0:
+                above.append(row)
+        below.sort(key=lambda x: x[3])
+        above.sort(key=lambda x: abs(x[3]))
+        return below, above
 
-if any([stocks_below, stocks_above, crypto_below, crypto_above]):
-    print("\nAssets matching criteria found. Sending email...")
-    send_email(f"Stocks & Crypto MA{ma_days} Scanner", html_body,
-               recipient_email, sender_email, sender_password)
-else:
-    print("\nNo assets matched the criteria. No email sent.")
+    stocks_below, stocks_above = sort_and_categorize(stock_results)
+    crypto_below, crypto_above = sort_and_categorize(crypto_results)
+    print(f"\n[INFO] Stocks: Found {len(stocks_below)} below MA, {len(stocks_above)} above MA.")
+    print(f"[INFO] Crypto: Found {len(crypto_below)} below MA, {len(crypto_above)} above MA.")
+
+    # ── Build & Send Report
+    total_results = len(stocks_below) + len(stocks_above) + len(crypto_below) + len(crypto_above)
+    if total_results > 0:
+        print(f"\n[INFO] Found {total_results} matching assets. Building report...")
+        
+        html_body = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{BASE_STYLE}</head><body>"
+        html_body += f"<h2 style='text-align:right; margin-right:24px;'>דוח סורק ממוצע נע {MA_DAYS} - {datetime.now().strftime('%d/%m/%Y')}</h2>"
+        html_body += make_table(stocks_below, f"מניות מתחת לממוצע (עד 1%)")
+        html_body += make_table(stocks_above, f"מניות מעל הממוצע (עד 1.5%)")
+        html_body += make_table(crypto_below, f"קריפטו מתחת לממוצע (עד 1%)")
+        html_body += make_table(crypto_above, f"קריפטו מעל הממוצע (עד 1.5%)")
+        html_body += "</body></html>"
+
+        display(HTML(html_body))
+        send_email(f"Scanner Results MA{MA_DAYS} - {datetime.now().strftime('%d-%m-%Y')}", html_body)
+    else:
+        print("\n[INFO] No matching assets found. No email sent.")
+
+if __name__ == "__main__":
+    main()
+
